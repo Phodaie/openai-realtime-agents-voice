@@ -24,6 +24,7 @@ import { createRealtimeConnection } from "./lib/realtimeConnection";
 
 // Agent configs
 import { allAgentSets, defaultAgentSetKey } from "@/app/agentConfigs";
+import { sleep } from "openai/core.mjs";
 
 function App() {
   const searchParams = useSearchParams();
@@ -42,6 +43,8 @@ function App() {
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const [sessionStatus, setSessionStatus] =
     useState<SessionStatus>("DISCONNECTED");
+  const [shouldReconnect, setShouldReconnect] = useState(false);
+  
 
   const [isEventsPaneExpanded, setIsEventsPaneExpanded] =
     useState<boolean>(true);
@@ -86,17 +89,48 @@ function App() {
     }
 
     const agents = allAgentSets[finalAgentConfig];
+    console.log("Selected agent config set:", agents);
     const agentKeyToUse = agents[0]?.name || "";
 
     setSelectedAgentName(agentKeyToUse);
     setSelectedAgentConfigSet(agents);
   }, [searchParams]);
 
+
+  
+
   useEffect(() => {
-    if (selectedAgentName && sessionStatus === "DISCONNECTED") {
-      connectToRealtime();
+    const handleReconnect = async () => {
+      const currentAgent = selectedAgentConfigSet?.find(
+        (a) => a.name === selectedAgentName
+      );
+
+      await connectToRealtime(currentAgent?.voice || "ash");
+      setShouldReconnect(false); // Reset the flag
+
+      addTranscriptBreadcrumb(
+        `Agent: ${selectedAgentName}`,
+        currentAgent
+      );
+      
+    };
+
+    if (shouldReconnect) {
+      handleReconnect();
     }
-  }, [selectedAgentName]);
+
+  }, [shouldReconnect]);
+
+  useEffect(() => {
+    
+    console.log(sessionStatus, dcRef.current?.readyState);
+    
+    if (sessionStatus === "CONNECTED" && dcRef.current?.readyState === "open") {
+      console.log("updateSession after reconnection");
+      updateSession(true);
+      
+    }
+  },[sessionStatus ]);
 
   useEffect(() => {
     if (
@@ -104,16 +138,23 @@ function App() {
       selectedAgentConfigSet &&
       selectedAgentName
     ) {
-      const currentAgent = selectedAgentConfigSet.find(
+      disconnectFromRealtime();
+      setSessionStatus("DISCONNECTED");
+      setShouldReconnect(true); // Trigger reconnection
+
+      const currentAgent = selectedAgentConfigSet?.find(
         (a) => a.name === selectedAgentName
       );
+      connectToRealtime(currentAgent?.voice || "ash");
+
       addTranscriptBreadcrumb(
         `Agent: ${selectedAgentName}`,
         currentAgent
       );
-      updateSession(true);
+      
+
     }
-  }, [selectedAgentConfigSet, selectedAgentName, sessionStatus]);
+  }, [selectedAgentConfigSet, selectedAgentName]);
 
   useEffect(() => {
     if (sessionStatus === "CONNECTED") {
@@ -124,9 +165,9 @@ function App() {
     }
   }, [isPTTActive]);
 
-  const fetchEphemeralKey = async (): Promise<string | null> => {
+  const fetchEphemeralKey = async (voice : String = "ash"): Promise<string | null> => {
     logClientEvent({ url: "/session" }, "fetch_session_token_request");
-    const tokenResponse = await fetch("/api/session");
+    const tokenResponse = await fetch(`/api/session?voice=${voice}`);
     const data = await tokenResponse.json();
     logServerEvent(data, "fetch_session_token_response");
 
@@ -140,28 +181,30 @@ function App() {
     return data.client_secret.value;
   };
 
-  const connectToRealtime = async () => {
+  const connectToRealtime = async (voice: string) => {
+    console.log(sessionStatus);
+    console.log("Connecting to realtime API...");
     if (sessionStatus !== "DISCONNECTED") return;
     setSessionStatus("CONNECTING");
-
+  
     try {
-      const EPHEMERAL_KEY = await fetchEphemeralKey();
+      const EPHEMERAL_KEY = await fetchEphemeralKey(voice);
       if (!EPHEMERAL_KEY) {
         return;
       }
-
+  
       if (!audioElementRef.current) {
         audioElementRef.current = document.createElement("audio");
       }
       audioElementRef.current.autoplay = isAudioPlaybackEnabled;
-
+  
       const { pc, dc } = await createRealtimeConnection(
         EPHEMERAL_KEY,
         audioElementRef
       );
       pcRef.current = pc;
       dcRef.current = dc;
-
+  
       dc.addEventListener("open", () => {
         logClientEvent({}, "data_channel.open");
       });
@@ -174,8 +217,9 @@ function App() {
       dc.addEventListener("message", (e: MessageEvent) => {
         handleServerEventRef.current(JSON.parse(e.data));
       });
-
+  
       setDataChannel(dc);
+     // setSessionStatus("CONNECTED");
     } catch (err) {
       console.error("Error connecting to realtime:", err);
       setSessionStatus("DISCONNECTED");
@@ -222,7 +266,9 @@ function App() {
     );
   };
 
-  const updateSession = (shouldTriggerResponse: boolean = false) => {
+  const updateSession = async (shouldTriggerResponse: boolean = false) => {
+
+    
     sendClientEvent(
       { type: "input_audio_buffer.clear" },
       "clear audio buffer on session update"
@@ -243,6 +289,8 @@ function App() {
         };
 
     const instructions = currentAgent?.instructions || "";
+    console.log("Instructions:\n", instructions);
+    const voice = currentAgent?.voice || "ash";
     const tools = currentAgent?.tools || [];
 
     const sessionUpdateEvent = {
@@ -250,7 +298,7 @@ function App() {
       session: {
         modalities: ["text", "audio"],
         instructions,
-        voice: "coral",
+        voice: voice,
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
         input_audio_transcription: { model: "whisper-1" },
@@ -339,7 +387,10 @@ function App() {
       disconnectFromRealtime();
       setSessionStatus("DISCONNECTED");
     } else {
-      connectToRealtime();
+      const currentAgent = selectedAgentConfigSet?.find(
+        (a) => a.name === selectedAgentName
+      );
+      connectToRealtime(currentAgent?.voice || "ash");
     }
   };
 

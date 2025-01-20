@@ -27,6 +27,7 @@ export interface Tool {
 
 export interface AgentConfig {
   name: string;
+  voice?: string;
   publicDescription: string; // gives context to agent transfer tool
   instructions: string;
   tools: Tool[];
